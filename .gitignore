@@ -1,0 +1,19 @@
+# 敏感環境變數
+.env
+
+# Docker volumes data
+data/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
