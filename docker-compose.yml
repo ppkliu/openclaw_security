@@ -37,7 +37,7 @@ services:
     volumes:
       - ${OPENCLAW_CONFIG_DIR:-openclaw-config}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR:-openclaw-workspace}:/home/node/.openclaw/workspace
-      - openclaw-skills:/home/node/.openclaw/skills
+      - ${OPENCLAW_SKILLS_DIR:-openclaw-skills}:/home/node/.openclaw/skills
     ports:
       - "${OPENCLAW_GATEWAY_BIND_ADDR:-127.0.0.1}:${OPENCLAW_GATEWAY_PORT:-18789}:18789"
       - "${OPENCLAW_GATEWAY_BIND_ADDR:-127.0.0.1}:${OPENCLAW_BRIDGE_PORT:-18790}:18790"
@@ -104,7 +104,7 @@ services:
     volumes:
       - ${OPENCLAW_CONFIG_DIR:-openclaw-config}:/home/node/.openclaw
       - ${OPENCLAW_WORKSPACE_DIR:-openclaw-workspace}:/home/node/.openclaw/workspace
-      - openclaw-skills:/home/node/.openclaw/skills
+      - ${OPENCLAW_SKILLS_DIR:-openclaw-skills}:/home/node/.openclaw/skills
     stdin_open: true
     tty: true
     init: true
