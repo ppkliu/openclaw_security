@@ -68,17 +68,18 @@ VLLM_API_KEY=token-abc123        # vLLM (http://host.docker.internal:8000/v1)
 OLLAMA_API_KEY=                   # Ollama (http://host.docker.internal:11434)
 ```
 
-Configure the provider in OpenClaw:
+Apply the configuration — `runclaw.sh` will automatically write vLLM settings to `openclaw.json` and set it as the default model:
 
 ```bash
-# Restart to apply .env changes
-docker compose up -d
+./runclaw.sh
+```
 
-# Set vLLM provider
+Or configure manually:
+
+```bash
 docker compose exec openclaw-gateway node dist/index.js config set \
-  models.providers.vllm '{"baseUrl":"http://host.docker.internal:8000/v1","api":"openai-completions","apiKey":"VLLM_API_KEY","models":[{"id":"YOUR_MODEL","contextWindow":128000,"maxTokens":8192,"reasoning":false,"input":["text"],"cost":{"input":0,"output":0}}]}'
+  models.providers.vllm '{"baseUrl":"http://host.docker.internal:8000/v1","api":"openai-completions","apiKey":"VLLM_API_KEY","models":[{"id":"YOUR_MODEL","name":"YOUR_MODEL","contextWindow":128000,"maxTokens":8192,"reasoning":false,"input":["text"],"cost":{"input":0,"output":0}}]}'
 
-# Set default model
 docker compose exec openclaw-gateway node dist/index.js config set \
   agents.defaults.model "vllm/YOUR_MODEL"
 
@@ -107,15 +108,15 @@ docker compose exec openclaw-gateway node dist/index.js --version
 
 ## Login to Control UI
 
-### Quick First Login
+### One-Click Run
 
-For first-time setup (or after switching to host path volumes), use the helper script:
+After editing `.env`, use `runclaw.sh` to apply all changes and start the service:
 
 ```bash
-chmod +x first-login.sh && ./first-login.sh
+chmod +x runclaw.sh && ./runclaw.sh
 ```
 
-This script automatically: fixes volume permissions → creates config → restarts gateway → displays login URL → approves device pairing.
+This script automatically: validates token & LLM config → checks vLLM reachability → fixes volume permissions → creates config → restarts Docker Compose → writes LLM provider to `openclaw.json` → health check → displays login URL → approves device pairing.
 
 ### Manual Login Steps
 
@@ -222,7 +223,7 @@ docker compose --profile cli run --rm openclaw-cli onboard
 ├── .env.example         # Environment variable template
 ├── .env                 # Actual environment variables (git ignored)
 ├── setup.sh             # One-click deployment script
-├── first-login.sh       # First login helper (permissions + pairing)
+├── runclaw.sh           # One-click run (validate + restart + LLM config + pairing)
 ├── Caddyfile            # HTTPS reverse proxy (optional)
 ├── docs/zh/             # Chinese documentation
 │   ├── README.md        # Chinese README
