@@ -78,25 +78,37 @@ fi
 # 3. 初始化 config（首次部署需要）
 # ----------------------------------------------------------
 info "初始化 OpenClaw 設定..."
+
+# 從 .env 讀取 image 設定，確保權限修正容器使用相同版本
+OPENCLAW_IMAGE=$(grep -E '^OPENCLAW_IMAGE=' .env 2>/dev/null | cut -d= -f2)
+OPENCLAW_IMAGE=${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:latest}
+
 docker compose pull --quiet
 
 # 建立 volumes 並修正權限
 docker compose up --no-start 2>/dev/null || true
 
-CONFIG_VOL=$(docker volume ls --format '{{.Name}}' | grep openclaw-config || true)
-WORKSPACE_VOL=$(docker volume ls --format '{{.Name}}' | grep openclaw-workspace || true)
+PROJECT_NAME=$(docker compose config --format json 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('name',''))" 2>/dev/null || basename "$SCRIPT_DIR" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_-]//g')
+CONFIG_VOL="${PROJECT_NAME}_openclaw-config"
+WORKSPACE_VOL="${PROJECT_NAME}_openclaw-workspace"
+SKILLS_VOL="${PROJECT_NAME}_openclaw-skills"
+
+# 驗證 volume 是否存在
+docker volume inspect "$CONFIG_VOL" &>/dev/null || CONFIG_VOL=""
+docker volume inspect "$WORKSPACE_VOL" &>/dev/null || WORKSPACE_VOL=""
+docker volume inspect "$SKILLS_VOL" &>/dev/null || SKILLS_VOL=""
 
 # 修正 volume 權限（Docker 預設建立為 root，container 以 node 使用者執行）
 if [ -n "$CONFIG_VOL" ]; then
     docker run --rm --user root \
         -v "${CONFIG_VOL}:/mnt/config" \
-        ghcr.io/openclaw/openclaw:latest \
+        "${OPENCLAW_IMAGE}" \
         sh -c 'chown -R node:node /mnt/config'
 
     # 建立最小 config（若不存在）
     docker run --rm --user root \
         -v "${CONFIG_VOL}:/mnt/config" \
-        ghcr.io/openclaw/openclaw:latest \
+        "${OPENCLAW_IMAGE}" \
         sh -c '
         if [ ! -f /mnt/config/openclaw.json ]; then
             cat > /mnt/config/openclaw.json << EOFCFG
@@ -121,8 +133,16 @@ fi
 if [ -n "$WORKSPACE_VOL" ]; then
     docker run --rm --user root \
         -v "${WORKSPACE_VOL}:/mnt/workspace" \
-        ghcr.io/openclaw/openclaw:latest \
+        "${OPENCLAW_IMAGE}" \
         sh -c 'chown -R node:node /mnt/workspace'
+fi
+
+# 修正 skills volume 權限（確保 node 使用者可安裝 skills）
+if [ -n "$SKILLS_VOL" ]; then
+    docker run --rm --user root \
+        -v "${SKILLS_VOL}:/mnt/skills" \
+        "${OPENCLAW_IMAGE}" \
+        sh -c 'chown -R node:node /mnt/skills'
 fi
 ok "設定初始化完成"
 
