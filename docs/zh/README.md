@@ -68,17 +68,18 @@ VLLM_API_KEY=token-abc123        # vLLM（http://host.docker.internal:8000/v1）
 OLLAMA_API_KEY=                   # Ollama（http://host.docker.internal:11434）
 ```
 
-設定 Provider 到 OpenClaw config：
+套用設定 — `runclaw.sh` 會自動將 vLLM 寫入 `openclaw.json` 並設為預設模型：
 
 ```bash
-# 重啟套用 .env
-docker compose up -d
+./runclaw.sh
+```
 
-# 設定 vLLM provider
+或手動設定：
+
+```bash
 docker compose exec openclaw-gateway node dist/index.js config set \
-  models.providers.vllm '{"baseUrl":"http://host.docker.internal:8000/v1","api":"openai-completions","apiKey":"VLLM_API_KEY","models":[{"id":"YOUR_MODEL","contextWindow":128000,"maxTokens":8192,"reasoning":false,"input":["text"],"cost":{"input":0,"output":0}}]}'
+  models.providers.vllm '{"baseUrl":"http://host.docker.internal:8000/v1","api":"openai-completions","apiKey":"VLLM_API_KEY","models":[{"id":"YOUR_MODEL","name":"YOUR_MODEL","contextWindow":128000,"maxTokens":8192,"reasoning":false,"input":["text"],"cost":{"input":0,"output":0}}]}'
 
-# 設定預設 model
 docker compose exec openclaw-gateway node dist/index.js config set \
   agents.defaults.model "vllm/YOUR_MODEL"
 
@@ -106,6 +107,18 @@ docker compose exec openclaw-gateway node dist/index.js --version
 ---
 
 ## 登入 Control UI
+
+### 一鍵啟動
+
+編輯 `.env` 後，使用 `runclaw.sh` 套用所有設定並啟動服務：
+
+```bash
+chmod +x runclaw.sh && ./runclaw.sh
+```
+
+腳本自動完成：驗證 Token 與 LLM 設定 → 檢查 vLLM 連線 → 修正 Volume 權限 → 建立設定檔 → 重啟 Docker Compose → 寫入 LLM Provider 到 `openclaw.json` → 健康檢查 → 顯示登入 URL → 自動配對裝置。
+
+### 手動登入步驟
 
 ### 步驟 1：取得 Gateway Token
 
@@ -210,6 +223,7 @@ docker compose --profile cli run --rm openclaw-cli onboard
 ├── .env.example         # 環境變數範例
 ├── .env                 # 實際環境變數（git ignored）
 ├── setup.sh             # 一鍵部署腳本
+├── runclaw.sh           # 一鍵啟動（驗證 + 重啟 + LLM 設定 + 配對）
 ├── Caddyfile            # HTTPS 反向代理（可選）
 ├── docs/zh/             # 中文文件
 │   ├── README.md        # 中文版 README
