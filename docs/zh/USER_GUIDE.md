@@ -870,6 +870,184 @@ hostname -I | awk '{print $1}'
 # 用該 IP 存取：http://<WSL2_IP>:18789
 ```
 
+### Gateway 啟動迴圈：`plugins.entries.hosts: Unrecognized key: "http"`
+
+症狀：`docker compose logs openclaw-gateway` 一直刷：
+```
+Config invalid
+File: ~/.openclaw/openclaw.json
+Problem:
+  - plugins.entries.hosts: Unrecognized key: "http"
+```
+
+原因：`openclaw.json` 被手動（或舊版工具）寫入了錯誤的 MCP 設定,把 MCP server 放在 `plugins.entries.hosts.<xxx>` 下。OpenClaw 的 schema 嚴格驗證,這個路徑不合法,Gateway 每次啟動都 fail 退出、重啟,形成迴圈,且 `docker compose exec` 也進不去容器,無法用 CLI 修復。
+
+**正確位置**:MCP server 應該放在 `mcp.servers.<name>`,用 `openclaw mcp set` 管理,不是手動塞進 `plugins`。
+
+**緊急復原步驟**(Gateway 開不起來時,只能直接編輯 JSON):
+```bash
+# 1. 備份壞掉的 config
+cp ./openclaw/openclaw.json ./bak/openclaw.json.$(date +%Y%m%d-%H%M%S)
+
+# 2. 移除 plugins.entries 下非法的 hosts 區塊
+#    保留其他合法 entries（例如 vllm）
+#    可用任何編輯器,把整段 "hosts": { ... } 刪除
+
+# 3. 重啟 gateway
+docker compose restart openclaw-gateway
+curl -sf http://127.0.0.1:18789/healthz && echo OK
+
+# 4. Gateway 活過來後,用正確方式重新加回 MCP server
+docker compose exec openclaw-gateway node dist/index.js mcp set <name> '{"url":"..."}'
+```
+
+### MCP server 連不上:`SSE error: Non-200 status code (404)`
+
+症狀:log 出現
+```
+[bundle-mcp] failed to start server "xxx" (http://host.docker.internal:30003): Error: SSE error: Non-200 status code (404)
+```
+
+原因:OpenClaw **預設用舊的 SSE transport**,但近期許多 MCP server 改用新的 **Streamable HTTP transport**(MCP spec 2024-11 起),端點通常在 `/mcp` 而不是 SSE 的 `/sse` + `/messages`。OpenClaw 打根路徑或 `/sse` 都得到 404。
+
+**診斷**:在 host 上分別 curl 各個可能路徑,看哪個回應才是 MCP server:
+```bash
+curl -v http://localhost:30003/
+curl -v http://localhost:30003/sse
+curl -v http://localhost:30003/mcp
+```
+- 若 `/mcp` 回 `400 {"error":"Invalid or missing session ID"}` → 是 Streamable HTTP
+- 若 `/sse` 回 `text/event-stream` → 是 SSE
+- 若根路徑就是 MCP endpoint,也看看 header
+
+**修法**:用 `openclaw mcp set` 指定正確的 `transport` 欄位:
+
+```bash
+# Streamable HTTP(新 spec,常見於最新的 MCP server)
+docker compose exec openclaw-gateway node dist/index.js mcp set rga-mcp-server \
+  '{"url":"http://host.docker.internal:30003/mcp","transport":"streamable-http","connectionTimeoutMs":10000}'
+
+# 傳統 SSE(transport 可省略)
+docker compose exec openclaw-gateway node dist/index.js mcp set my-sse-server \
+  '{"url":"http://host.docker.internal:4000/sse"}'
+
+# 需要 Authorization header
+docker compose exec openclaw-gateway node dist/index.js mcp set secure-mcp \
+  '{"url":"https://mcp.example.com/mcp","transport":"streamable-http","headers":{"Authorization":"Bearer <token>"}}'
+
+# 套用設定
+docker compose restart openclaw-gateway
+```
+
+**注意**:`mcp set` 只寫 config,不會實際連線驗證。真正的連線是 lazy 建立的,agent 第一次呼叫該 MCP tool 時才會嘗試握手,屆時看 gateway log 才會知道是否成功。
+
+另外容器裡要用 `host.docker.internal` 解析到宿主機 IP,需要 `docker-compose.yml` 設定 `extra_hosts: ["host.docker.internal:host-gateway"]`(本專案預設已設)。
+
+### vLLM 對話失敗:`Context overflow: prompt too large for the model`
+
+症狀:agent 呼叫模型時得到
+```
+[agent] embedded run agent end: ... isError=true
+error=Context overflow: prompt too large for the model.
+rawError=400 This model's maximum context length is 32768 tokens.
+However, you requested 32000 output tokens and your prompt contains at least 769 input tokens,
+for a total of at least 32769 tokens.
+```
+
+原因:`.env` 裡的 `VLLM_CONTEXT_WINDOW` / `VLLM_MAX_TOKENS` **大於 vLLM 後端實際的 `--max-model-len`**。OpenClaw 把這兩個值寫進 `openclaw.json`,對每個 request 都 request 到接近上限的 output tokens,加上 prompt 就超過後端真正能處理的長度,被 vLLM 直接 400 掉。
+
+**檢查實際後端上限**:
+```bash
+# 查 vLLM 啟動參數裡的 --max-model-len(在 vLLM 那台機器上)
+# 或從錯誤訊息直接讀:maximum context length is N tokens
+
+# 也可從 /v1/models endpoint 看(部分 vLLM 版本會回 max_model_len)
+curl -s http://<vllm-host>:<port>/v1/models | jq
+```
+
+**修法**:把 `.env` 的值調到**不超過後端上限**,並預留輸入空間:
+```bash
+# 假設後端 --max-model-len=32768
+VLLM_CONTEXT_WINDOW=32768   # 必須 ≤ 後端實際上限
+VLLM_MAX_TOKENS=8192        # output 上限,建議 ≤ context 的 1/4,留空間給 prompt
+```
+
+公式:`prompt_tokens + VLLM_MAX_TOKENS ≤ VLLM_CONTEXT_WINDOW`。
+
+改完後**必須強制重寫 `openclaw.json`**(否則 runclaw.sh 會因為 model 名稱相同而跳過重新設定):
+```bash
+# 方法 A:用 runclaw.sh update 強制重跑所有步驟
+./runclaw.sh update
+
+# 方法 B:直接用 config set 更新(不用重跑整個 pipeline)
+docker compose exec openclaw-gateway node dist/index.js config set models.providers.vllm \
+  '{"baseUrl":"http://<host>:<port>/v1","api":"openai-completions","apiKey":"EMPTY","models":[{"id":"<model-id>","name":"<model-id>","contextWindow":32768,"maxTokens":8192,"reasoning":false,"input":["text"],"cost":{"input":0,"output":0}}]}'
+docker compose restart openclaw-gateway
+```
+
+### Embedded ACPX runtime(codex-acp)啟動失敗:ENOSPC + Permission denied
+
+症狀:
+```
+[plugins] embedded acpx runtime backend probe failed:
+  embedded ACP runtime probe failed (agent=codex; command=npx @zed-industries/codex-acp@^0.11.1;
+  cwd=/home/node/.openclaw/workspace;
+  ACP agent exited before initialize completed (exit=126, signal=null):
+  npm warn tar TAR_ENTRY_ERROR ENOSPC: no space left on device, write
+  sh: 1: codex-acp: Permission denied)
+```
+
+**影響範圍**:只影響「OpenClaw 用 embedded ACPX runtime 跑本地 codex coding agent」的功能。對下列功能**沒有影響**:
+- vLLM / Anthropic / OpenAI 等外部 provider 的對話
+- Control UI、WebSocket、channels
+- MCP server registry 與 MCP client 連線
+
+**根本原因**:
+1. **ENOSPC**:`docker-compose.yml` 把 `.npm` 和 `.cache` 掛成 tmpfs(大小預設很小,約 64M),不夠放 `@zed-industries/codex-acp` 及其依賴(通常 200MB+)
+2. **Permission denied**:就算裝起來了,tmpfs 掛載可能帶 `noexec` flag,npm 安裝出來的 shim 腳本無法執行
+3. 容器 `read_only: true` 限制了可寫路徑,所以必須透過 tmpfs 或 volume 提供寫入空間
+
+**不使用 codex 時**:直接忽略這個 warning 即可,它不會阻止 gateway 啟動。
+
+**需要啟用 codex runtime 時**,選一條路:
+
+**方案 A:擴大 tmpfs 並確保可執行**(改 `docker-compose.yml`)
+```yaml
+services:
+  openclaw-gateway:
+    # ...
+    tmpfs:
+      - /tmp:size=256M,mode=1777
+      - /home/node/.cache:size=512M,mode=0755,exec
+      - /home/node/.npm:size=512M,mode=0755,exec   # 關鍵:exec,不能是 noexec;容量 ≥ 512M
+      - /home/node/.openclaw/skills:size=256M,mode=0755,exec
+```
+注意 `exec` 必須明確指定,許多 Docker 預設 tmpfs 是 `noexec`。改完後 `docker compose down && docker compose up -d`(restart 不會重建 tmpfs)。
+
+**方案 B:改掛 named volume 代替 tmpfs**(資料會持久化但更穩定)
+```yaml
+services:
+  openclaw-gateway:
+    # ...
+    volumes:
+      - openclaw_npm:/home/node/.npm
+      - openclaw_cache:/home/node/.cache
+volumes:
+  openclaw_npm:
+  openclaw_cache:
+```
+需確認 volume owner 是 uid 1000(`node` user),不是就 `docker run --rm --user root -v openclaw_npm:/mnt ghcr.io/openclaw/openclaw:latest chown -R node:node /mnt`。
+
+**方案 C:build 預先裝好 codex-acp 的自訂 image**(最穩)
+```dockerfile
+FROM ghcr.io/openclaw/openclaw:latest
+USER root
+RUN npm install -g @zed-industries/codex-acp@0.11.1 \
+ && chmod +x $(npm bin -g)/codex-acp
+USER node
+```
+然後在 `docker-compose.yml` 把 `image:` 改成自己 build 的 tag。這條路不受 tmpfs noexec 影響,升級也容易。
+
 ### 完全重置
 
 ```bash
